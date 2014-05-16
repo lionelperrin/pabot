@@ -30,9 +30,21 @@ from robot.run import USAGE
 from robot.utils import ArgumentParser
 import signal
 import random
+from contextlib import contextmanager
 
 CTRL_C_PRESSED = False
 
+@contextmanager
+def _acquire_resource(resources):
+    if resources is not None:
+        r = resources.get()
+        yield r
+        resources.put(r)
+    else:
+        yield None
+
+def _quote_cmd(cmd):
+    return [c if ' ' not in c else '"%s"' % c for c in cmd]
 
 def execute_and_wait_with(args):
     global CTRL_C_PRESSED
@@ -40,16 +52,20 @@ def execute_and_wait_with(args):
         # Keyboard interrupt has happened!
         return
     time.sleep(0)
-    datasources, outs_dir, options, suite_name_list, command, verbose = args
+    datasources, outs_dir, options, suite_name_list, command, verbose, shared_resources = args
     datasources = [d.encode('utf-8') if isinstance(d, unicode) else d for d in datasources]
     for suite_name in suite_name_list:
         outs = os.path.join(outs_dir, suite_name)
-        cmd = command + _options_for_custom_executor(options, outs, suite_name) + datasources
-        cmd = [c if ' ' not in c else '"%s"' % c for c in cmd]
         os.makedirs(outs)
         with open(os.path.join(outs, 'stdout.txt'), 'w') as stdout, \
-            open(os.path.join(outs, 'stderr.txt'), 'w') as stderr:
-                process, rc = _run(cmd, stderr, stdout, suite_name, verbose)
+             open(os.path.join(outs, 'stderr.txt'), 'w') as stderr, \
+             _acquire_resource(shared_resources) as resource:
+            cmd_resources = ["%s" % (resource)] if resource else []
+            cmd = _quote_cmd (command ) \
+                  + _quote_cmd( _options_for_custom_executor(options, outs_dir, suite_name) ) \
+                  + cmd_resources \
+                  + _quote_cmd( datasources )
+            process, rc = _run(cmd, stderr, stdout, suite_name, verbose)
         if rc != 0:
             print _execution_failed_message(suite_name, process, rc, verbose)
         else:
@@ -132,14 +148,19 @@ def _pre_compute_distrib( suite_names, processes ):
         lists[i%processes].append( s )
     return lists
 
+def _read_resources( filename ):
+    with open(filename, 'r') as f:
+        return [i.strip() for i in f.readlines() if i.strip() != '' and not i.strip().startswith('#')]
+
 def _parse_args(args):
     pabot_args = {'command':['pybot'],
                   'verbose':False,
                   'processes':max(multiprocessing.cpu_count(), 2),
                   'load_balancing':True,
-                  'seed':None
+                  'seed':None,
+                  'resources':[],
                   }
-    while args and args[0] in ['--command', '--processes', '--verbose', '--no_load_balancing', '--randomize_suites']:
+    while args and args[0] in ['--command', '--processes', '--verbose', '--no_load_balancing', '--randomize_suites', '--resource_file']:
         if args[0] == '--command':
             end_index = args.index('--end-command')
             pabot_args['command'] = args[1:end_index]
@@ -161,6 +182,13 @@ def _parse_args(args):
             except ValueError:
                 pabot_args['seed'] = random.randint(0, sys.maxint)
                 args = args[1:]
+        if args[0] == '--resource_file':
+            pabot_args['resources'] = _read_resources(args[1])
+            args = args[2:]
+
+    if pabot_args['resources'] and pabot_args['processes'] > len(pabot_args['resources']):
+        pabot_args['processes'] = len(pabot_args['resources'])
+        print 'reducing the number of processes to %d: the number of resources' % (pabot_args['processes'])
     options, datasources = ArgumentParser(USAGE, auto_pythonpath=False, auto_argumentfile=False).parse_args(args)
     keys = set()
     for k in options:
@@ -239,13 +267,20 @@ def _parallel_execute(datasources, options, outs_dir, pabot_args, suite_names):
         else:
             suite_names_distrib = _pre_compute_distrib( suite_names, pabot_args['processes'] )
 
+        shared_resources = None
+        if pabot_args['resources']:
+            shared_resources = multiprocessing.Queue( len(pabot_args['resources']) )
+            for e in pabot_args['resources']:
+                shared_resources.put( e )
+
         result = pool.map_async(execute_and_wait_with,
                    [(datasources,
                      outs_dir,
                      options,
                      suite,
                      pabot_args['command'],
-                     pabot_args['verbose'])
+                     pabot_args['verbose'],
+                     shared_resources)
                     for suite in suite_names_distrib])
         while not result.ready():
             # keyboard interrupt is executed in main thread and needs this loop to get time to get executed
@@ -303,6 +338,12 @@ This option gives a reproduceable distribution but the total execution time may 
 --randomize_suites [SEED]
 randomize suites execution order using an optional seed argument
 
+--resource_file [FILENAME]
+use FILENAME to declare resources for the workers 
+   for instance, if workers require a servername variable, FILENAME can be defined with this content:
+   --variable servername:server1
+   --variable servername:server2
+   --variable servername:server3
 """
         print i.message
     finally:
