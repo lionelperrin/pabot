@@ -14,7 +14,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-import os, sys, time, datetime
+import os, sys, time, datetime, math
 import multiprocessing
 from glob import glob
 from StringIO import StringIO
@@ -29,6 +29,7 @@ from multiprocessing.pool import ThreadPool
 from robot.run import USAGE
 from robot.utils import ArgumentParser
 import signal
+import random
 
 CTRL_C_PRESSED = False
 
@@ -39,20 +40,21 @@ def execute_and_wait_with(args):
         # Keyboard interrupt has happened!
         return
     time.sleep(0)
-    datasources, outs_dir, options, suite_name, command, verbose = args
+    datasources, outs_dir, options, suite_name_list, command, verbose = args
     datasources = [d.encode('utf-8') if isinstance(d, unicode) else d for d in datasources]
-    outs_dir = os.path.join(outs_dir, suite_name)
-    cmd = command + _options_for_custom_executor(options, outs_dir, suite_name) + datasources
-    cmd = [c if ' ' not in c else '"%s"' % c for c in cmd]
-    os.makedirs(outs_dir)
-    with open(os.path.join(outs_dir, 'stdout.txt'), 'w') as stdout, \
-        open(os.path.join(outs_dir, 'stderr.txt'), 'w') as stderr:
-            process, rc = _run(cmd, stderr, stdout, suite_name, verbose)
-    if rc != 0:
-        print _execution_failed_message(suite_name, process, rc, verbose)
-    else:
-        print 'PASSED %s' % suite_name
-
+    for suite_name in suite_name_list:
+        outs = os.path.join(outs_dir, suite_name)
+        cmd = command + _options_for_custom_executor(options, outs, suite_name) + datasources
+        cmd = [c if ' ' not in c else '"%s"' % c for c in cmd]
+        os.makedirs(outs)
+        with open(os.path.join(outs, 'stdout.txt'), 'w') as stdout, \
+            open(os.path.join(outs, 'stderr.txt'), 'w') as stderr:
+                process, rc = _run(cmd, stderr, stdout, suite_name, verbose)
+        if rc != 0:
+            print _execution_failed_message(suite_name, process, rc, verbose)
+        else:
+            print 'PASSED %s' % suite_name
+   
 def _run(cmd, stderr, stdout, suite_name, verbose):
     process = subprocess.Popen(' '.join(cmd),
                                shell=True,
@@ -124,11 +126,20 @@ def get_suite_names(output_file):
     except:
        return []
 
+def _pre_compute_distrib( suite_names, processes ):
+    lists = [ list() for i in range(processes) ]
+    for i, s in enumerate(suite_names):
+        lists[i%processes].append( s )
+    return lists
+
 def _parse_args(args):
     pabot_args = {'command':['pybot'],
                   'verbose':False,
-                  'processes':max(multiprocessing.cpu_count(), 2)}
-    while args and args[0] in ['--command', '--processes', '--verbose']:
+                  'processes':max(multiprocessing.cpu_count(), 2),
+                  'load_balancing':True,
+                  'seed':None
+                  }
+    while args and args[0] in ['--command', '--processes', '--verbose', '--no_load_balancing', '--randomize_suites']:
         if args[0] == '--command':
             end_index = args.index('--end-command')
             pabot_args['command'] = args[1:end_index]
@@ -139,6 +150,17 @@ def _parse_args(args):
         if args[0] == '--verbose':
             pabot_args['verbose'] = True
             args = args[1:]
+        if args[0] == '--no_load_balancing':
+            pabot_args['load_balancing'] = False
+            args = args[1:]
+        if args[0] == '--randomize_suites':
+            try:
+                #if next argument is a seed, read it
+                pabot_args['seed'] = int(args[1])
+                args = args[2:]
+            except ValueError:
+                pabot_args['seed'] = random.randint(0, sys.maxint)
+                args = args[1:]
     options, datasources = ArgumentParser(USAGE, auto_pythonpath=False, auto_argumentfile=False).parse_args(args)
     keys = set()
     for k in options:
@@ -209,6 +231,14 @@ def _parallel_execute(datasources, options, outs_dir, pabot_args, suite_names):
     if suite_names:
         original_signal_handler = signal.signal(signal.SIGINT, keyboard_interrupt)
         pool = ThreadPool(pabot_args['processes'])
+        if pabot_args['seed']:
+    		rand = random.Random( pabot_args['seed'] )
+        	rand.shuffle( suite_names )
+        if pabot_args['load_balancing']:
+            suite_names_distrib = [[i] for i in suite_names]
+        else:
+            suite_names_distrib = _pre_compute_distrib( suite_names, pabot_args['processes'] )
+
         result = pool.map_async(execute_and_wait_with,
                    [(datasources,
                      outs_dir,
@@ -216,14 +246,16 @@ def _parallel_execute(datasources, options, outs_dir, pabot_args, suite_names):
                      suite,
                      pabot_args['command'],
                      pabot_args['verbose'])
-                    for suite in suite_names])
-        pool.close()
+                    for suite in suite_names_distrib])
         while not result.ready():
             # keyboard interrupt is executed in main thread and needs this loop to get time to get executed
             try:
                 time.sleep(0.1)
             except IOError:
                 keyboard_interrupt()
+        pool.close()
+        pool.join()
+        result.get() #throw exception from workers if any
         signal.signal(signal.SIGINT, original_signal_handler)
 
 def _output_dir(options):
@@ -243,7 +275,11 @@ def main(args):
         options, datasources, pabot_args = _parse_args(args)
         outs_dir = _output_dir(options)
         suite_names = solve_suite_names(outs_dir, datasources, options)
+        if pabot_args['verbose']:
+            print 'Parallel execution of suites: ' + str(suite_names)
+            print
         _parallel_execute(datasources, options, outs_dir, pabot_args, suite_names)
+        print "Merging test results."
         sys.exit(rebot(*sorted(glob(os.path.join(outs_dir, '**/*.xml'))),
                        **_options_for_rebot(options, datasources, start_time_string, _now())))
     except Information, i:
@@ -258,7 +294,16 @@ more output
 RF script for situations where pybot is not used directly
 
 --processes [NUMBER OF PROCESSES]
-How many parallel executors to use (default max of 2 and cpu count)"""
+How many parallel executors to use (default max of 2 and cpu count)
+
+--no_load_balancing 
+pre-compute the distribution of the suites among the workers. 
+This option gives a reproduceable distribution but the total execution time may increase in a significant way.
+
+--randomize_suites [SEED]
+randomize suites execution order using an optional seed argument
+
+"""
         print i.message
     finally:
         _print_elapsed(start_time, time.time())
