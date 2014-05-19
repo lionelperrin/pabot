@@ -62,7 +62,7 @@ def execute_and_wait_with(args):
              _acquire_resource(shared_resources) as resource:
             cmd_resources = ["%s" % (resource)] if resource else []
             cmd = _quote_cmd (command ) \
-                  + _quote_cmd( _options_for_custom_executor(options, outs_dir, suite_name) ) \
+                  + _quote_cmd( _options_for_custom_executor(options, outs, suite_name) ) \
                   + cmd_resources \
                   + _quote_cmd( datasources )
             process, rc = _run(cmd, stderr, stdout, suite_name, verbose)
