@@ -186,9 +186,13 @@ def _parse_args(args):
             pabot_args['resources'] = _read_resources(args[1])
             args = args[2:]
 
-    if pabot_args['resources'] and pabot_args['processes'] > len(pabot_args['resources']):
-        pabot_args['processes'] = len(pabot_args['resources'])
-        print 'reducing the number of processes to %d: the number of resources' % (pabot_args['processes'])
+    if pabot_args['resources']:
+        if pabot_args['processes'] > len(pabot_args['resources']):
+            pabot_args['processes'] = len(pabot_args['resources'])
+            print 'reducing the number of processes to %d: the number of resources' % (pabot_args['processes'])
+        elif pabot_args['processes'] < len(pabot_args['resources']):
+            pabot_args['resources'] = pabot_args['resources'][:pabot_args['processes']]
+            print 'considering only the first %d resources' % pabot_args['processes']
     options, datasources = ArgumentParser(USAGE, auto_pythonpath=False, auto_argumentfile=False).parse_args(args)
     keys = set()
     for k in options:
