@@ -254,25 +254,40 @@ def _print_elapsed(start, end):
 def keyboard_interrupt(*args):
     global CTRL_C_PRESSED
     CTRL_C_PRESSED = True
+    
+def _create_queue( resources ):
+    q = multiprocessing.Queue( len(resources) )
+    for e in resources:
+        q.put( e )
+    return (q, resources)
 
 def _parallel_execute(datasources, options, outs_dir, pabot_args, suite_names):
     if suite_names:
         original_signal_handler = signal.signal(signal.SIGINT, keyboard_interrupt)
         pool = ThreadPool(pabot_args['processes'])
         if pabot_args['seed']:
-    		rand = random.Random( pabot_args['seed'] )
-        	rand.shuffle( suite_names )
+            rand = random.Random( pabot_args['seed'] )
+            rand.shuffle( suite_names )
         if pabot_args['load_balancing']:
-            suite_names_distrib = [[i] for i in suite_names]
+            shared_resources = (None, None)
+            if pabot_args['resources']:
+                shared_resources = _create_queue( pabot_args['resources'] )
+            suite_names_distrib = [([i], shared_resources) for i in suite_names]
         else:
-            suite_names_distrib = _pre_compute_distrib( suite_names, pabot_args['processes'] )
+            shared_resources = [ (None, None) ] * pabot_args['processes']
+            if pabot_args['resources']:
+                assert( pabot_args['processes'] == len(pabot_args['resources']) )
+                shared_resources = [ _create_queue([e]) for e in pabot_args['resources'] ]
+            suite_names_distrib = zip( _pre_compute_distrib( suite_names, pabot_args['processes'] ), shared_resources )
 
-        shared_resources = None
-        if pabot_args['resources']:
-            shared_resources = multiprocessing.Queue( len(pabot_args['resources']) )
-            for e in pabot_args['resources']:
-                shared_resources.put( e )
-
+        if pabot_args['verbose']:
+            print 'Parallel execution of suites: '
+            for (suite, (resources_queue, resources_names)) in suite_names_distrib:
+                print '- %s' % (str(suite) if len(suite) > 1 else suite[0]),
+                if resources_names:
+                    print "using resource %s" % ("from %s" % str(resources_names) if len(resources_names) > 1 else "'%s'" % resources_names[0]),
+                print
+        
         result = pool.map_async(execute_and_wait_with,
                    [(datasources,
                      outs_dir,
@@ -280,8 +295,8 @@ def _parallel_execute(datasources, options, outs_dir, pabot_args, suite_names):
                      suite,
                      pabot_args['command'],
                      pabot_args['verbose'],
-                     shared_resources)
-                    for suite in suite_names_distrib])
+                     resources_queue)
+                    for (suite, (resources_queue, resources_names)) in suite_names_distrib])
         while not result.ready():
             # keyboard interrupt is executed in main thread and needs this loop to get time to get executed
             try:
@@ -310,9 +325,6 @@ def main(args):
         options, datasources, pabot_args = _parse_args(args)
         outs_dir = _output_dir(options)
         suite_names = solve_suite_names(outs_dir, datasources, options)
-        if pabot_args['verbose']:
-            print 'Parallel execution of suites: ' + str(suite_names)
-            print
         _parallel_execute(datasources, options, outs_dir, pabot_args, suite_names)
         print "Merging test results."
         sys.exit(rebot(*sorted(glob(os.path.join(outs_dir, '**/*.xml'))),
