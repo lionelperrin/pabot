@@ -159,22 +159,23 @@ def _parse_args(args):
                   'load_balancing':True,
                   'seed':None,
                   'resources':[],
+                  'metadata':[],
                   }
-    while args and args[0] in ['--command', '--processes', '--verbose', '--no_load_balancing', '--randomize_suites', '--resource_file']:
+    while args and args[0] in ['--command', '--processes', '--verbose', '--no_load_balancing', '--randomize_suites', '--resource_file', '--metadata']:
         if args[0] == '--command':
             end_index = args.index('--end-command')
             pabot_args['command'] = args[1:end_index]
             args = args[end_index+1:]
-        if args[0] == '--processes':
+        elif args[0] == '--processes':
             pabot_args['processes'] = int(args[1])
             args = args[2:]
-        if args[0] == '--verbose':
+        elif args[0] == '--verbose':
             pabot_args['verbose'] = True
             args = args[1:]
-        if args[0] == '--no_load_balancing':
+        elif args[0] == '--no_load_balancing':
             pabot_args['load_balancing'] = False
             args = args[1:]
-        if args[0] == '--randomize_suites':
+        elif args[0] == '--randomize_suites':
             try:
                 #if next argument is a seed, read it
                 pabot_args['seed'] = int(args[1])
@@ -182,8 +183,11 @@ def _parse_args(args):
             except ValueError:
                 pabot_args['seed'] = random.randint(0, sys.maxint)
                 args = args[1:]
-        if args[0] == '--resource_file':
+        elif args[0] == '--resource_file':
             pabot_args['resources'] = _read_resources(args[1])
+            args = args[2:]
+        elif args[0] == '--metadata':
+            pabot_args['metadata'].append( args[1] )
             args = args[2:]
 
     if pabot_args['resources']:
@@ -228,13 +232,15 @@ def _options_for_dryrun(options, outs_dir):
         options['monitormarkers'] = 'off'
     return options
 
-def _options_for_rebot(options, datasources, start_time_string, end_time_string):
+def _options_for_rebot(options, datasources, start_time_string, end_time_string, pabot_args):
     rebot_options = options.copy()
     rebot_options['name'] = options.get('name', ', '.join(datasources))
     rebot_options['starttime'] = start_time_string
     rebot_options['endtime'] = end_time_string
     rebot_options['output'] = rebot_options.get('output', 'output.xml')
     rebot_options['monitorcolors'] = 'off'
+    rebot_options['metadata'] = pabot_args['metadata'] + \
+        ["%s: %s" % (k, pabot_args[k]) for k in ['processes', 'resources', 'load_balancing', 'seed'] if pabot_args[k]]
     if ROBOT_VERSION >= '2.8':
         options['monitormarkers'] = 'off'
     return rebot_options
@@ -332,7 +338,7 @@ def main(args):
         _parallel_execute(datasources, options, outs_dir, pabot_args, suite_names)
         print "Merging test results."
         sys.exit(rebot(*sorted(glob(os.path.join(outs_dir, '**/*.xml'))),
-                       **_options_for_rebot(options, datasources, start_time_string, _now())))
+                       **_options_for_rebot(options, datasources, start_time_string, _now(), pabot_args)))
     except Information, i:
         print """A parallel executor for Robot Framework test cases.
 
@@ -360,6 +366,9 @@ use FILENAME to declare resources for the workers
    --variable servername:server1
    --variable servername:server2
    --variable servername:server3
+   
+--metadata [name:value]
+See rebot documentation for usage
 """
         print i.message
     finally:
